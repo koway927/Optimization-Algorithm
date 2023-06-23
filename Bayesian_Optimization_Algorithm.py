@@ -2,11 +2,14 @@ from pymoo.core.algorithm import Algorithm
 from sklearn.gaussian_process import GaussianProcessRegressor
 from numpy.random import uniform
 from numpy import argmax
+from numpy import sum
 from numpy import vstack
 from pymoo.core.initialization import Initialization
 from pymoo.operators.sampling.rnd import FloatRandomSampling
 from pymoo.core.repair import NoRepair
 from pymoo.core.population import Population
+from scipy.stats import norm
+
 #The optimization process itself is as follows:
 
 # 1. Define the black box function f(x), the acquisition function a(x) 
@@ -43,6 +46,7 @@ class BayesianOptimiztion(Algorithm):
         self.Y = None
         self.initialization = Initialization(FloatRandomSampling())
         self.repair = repair
+        self.X_new = None
 
     
         
@@ -51,16 +55,21 @@ class BayesianOptimiztion(Algorithm):
     
     def _initialize_infill(self):
         initial_pop = self.initialization.do(self.problem, self.sample_size, algorithm=self)
-        self.Y = initial_pop.get("F")
+        #print("initial_pop X",initial_pop.get("X"))
+        #print("initial_pop F",self.problem.evaluate(initial_pop.get("X")))
+        initial_X = initial_pop.get("X")
+        initial_Y = self.problem.evaluate(initial_pop.get("X"))
+        self.update_model(initial_X,initial_Y)
         return initial_pop
     
     def _infill(self):
-        X_new = self.optimize_acquisition_function()
-        off = Population.new(X=X_new)
+        self.X_new = self.optimize_acquisition_function()
+        off = Population.new(X=vstack((self.pop.get("X"), self.X_new)))
         return off
+        
     
     def _advance(self, infills=None, **kwargs):
-        return self.update_data_set()
+        self.update_data_set()
     
     def _finalize(self):
         return super()._finalize()
@@ -80,37 +89,39 @@ class BayesianOptimiztion(Algorithm):
     # define the acquisition function   
     def optimize_acquisition_function(self):
         if self.problem.has_bounds():
-            # Randomly draw 1000 sample points from the search space
+            # Randomly draw 100 sample points from the search space
             X_sample = self.sample()
             # calculate the current best surrogate score 
-            mu, std = self.surrogate_function(self.pop.get("X"))
+            mu, _ = self.surrogate_function(self.pop.get("X"))
+            #print("mu",mu)
             # calculate mean and std of the sample in the surrogate function
             mu_sample, std_sample = self.surrogate_function(X_sample)
+            #print("mu_sample",mu_sample)
             current_best = max(mu)
+            print("current_best",current_best)
             # calculate the probability of improvement
-            pi = (mu_sample - current_best) / std_sample
+            probability_of_improvement = mu_sample - current_best / (std_sample + 1**-16)
+            # calculate the expected improvement
+            #expected_improvement = (mu - current_best) * probability_of_improvement + std_sample * norm.pdf(probability_of_improvement)
             # find the index of the greatest scores
-            index = argmax(pi)
+            #print("pi",pi)
+            sum_probability_of_improvement = sum(probability_of_improvement, axis = 1)
+            index = argmax(sum_probability_of_improvement)
+            #print("probability_of_improvement",probability_of_improvement)
             return X_sample[index, :]
     
-    # generate initial samples and evaluate them
-    def generate_initial_samples(self):
-        X = self.sample()
-        Y = self.problem.evaluate(X)
-        return X, Y
-    
+    def get_next_points(self):
+        return self.optimize_acquisition_function()
     # update the model with new samples
     def update_model(self, X, Y):
         self.model.fit(X, Y)
 
     # optimize the acquisition function
     def update_data_set(self):
-        # find the best point
-        x = self.optimize_acquisition_function(self.problem)
-        # calculate the new target value
-        y = self.problem.evaluate(x)
+        y = self.problem.evaluate(self.X_new)
         # update the 
-        self.X = vstack((self.pop.get("X"), x))
-        self.Y = vstack((self.pop.get("Y"), y))
-        self.update_model(self.X, self.Y)
+        updated_X = vstack((self.pop.get("X"), self.X_new))
+        #print("updated_X",updated_X)
+        updated_Y = vstack((self.pop.get("F"), y))
+        self.update_model(updated_X, updated_Y)
     
