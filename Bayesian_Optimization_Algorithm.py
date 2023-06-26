@@ -98,7 +98,7 @@ class BayesianOptimiztion(Algorithm):
             mu_sample, std_sample = self.surrogate_function(X_sample)
             #print("mu_sample",mu_sample)
             current_best = max(mu)
-            print("current_best",current_best)
+            print("mu",mu)
             # calculate the probability of improvement
             probability_of_improvement = mu_sample - current_best / (std_sample + 1**-16)
             # calculate the expected improvement
