@@ -2,13 +2,15 @@ from pymoo.core.algorithm import Algorithm
 from sklearn.gaussian_process import GaussianProcessRegressor
 from numpy.random import uniform
 from numpy import argmax
-from numpy import sum
+from numpy import argmin
 from numpy import vstack
 from pymoo.core.initialization import Initialization
 from pymoo.operators.sampling.rnd import FloatRandomSampling
 from pymoo.core.repair import NoRepair
 from pymoo.core.population import Population
 from scipy.stats import norm
+from scipy.optimize import minimize as scipy_minimize
+from numpy import array
 
 #The optimization process itself is as follows:
 
@@ -32,21 +34,22 @@ from scipy.stats import norm
 
 class BayesianOptimiztion(Algorithm):
     def __init__(self,
-                 sample_size = 100, # The number of initial samples to be generated from the problems and 
+                 sample_size = 10, # The number of samples to be generated from the problems and 
                                     #used in the acquisition function
+                 sampling=FloatRandomSampling(),        
                  repair=NoRepair(),
+                 model = GaussianProcessRegressor(),# the surrogate model to be used in the optimization
                  **kwargs):
         
         super().__init__(**kwargs)
 
-        # the surrogate model to be used in the optimization
-        self.model = None
-        #the data set to be used in the optimization
         self.sample_size = sample_size
-        self.Y = None
-        self.initialization = Initialization(FloatRandomSampling())
+        self.initialization = Initialization(sampling)
+        self.model = model
         self.repair = repair
-        self.X_new = None
+        #the data set to be used in the optimization
+        self.data_set_X = None
+        self.data_set_Y = None
 
     
         
@@ -54,22 +57,28 @@ class BayesianOptimiztion(Algorithm):
         self.model = GaussianProcessRegressor()
     
     def _initialize_infill(self):
-        initial_pop = self.initialization.do(self.problem, self.sample_size, algorithm=self)
-        #print("initial_pop X",initial_pop.get("X"))
-        #print("initial_pop F",self.problem.evaluate(initial_pop.get("X")))
-        initial_X = initial_pop.get("X")
-        initial_Y = self.problem.evaluate(initial_pop.get("X"))
-        self.update_model(initial_X,initial_Y)
-        return initial_pop
-    
+        return self.initialization.do(self.problem, self.sample_size, algorithm=self)
+
+    def _initialize_advance(self, infills=None, **kwargs):
+        self.data_set_X = self.pop.get("X")
+        self.data_set_Y = self.problem.evaluate(self.data_set_X)
+        self.update_model(self.data_set_X,self.data_set_Y)
+
+        super()._initialize_advance(infills=infills, **kwargs)
+
     def _infill(self):
-        self.X_new = self.optimize_acquisition_function()
-        off = Population.new(X=vstack((self.pop.get("X"), self.X_new)))
+        X_new = self.optimize_acquisition_function()
+        self.update_data_set(X_new)
+        self.update_model(self.data_set_X,self.data_set_Y)
+
+        off = Population.new(X=self.data_set_X)
+        self.pop = off
         return off
         
     
     def _advance(self, infills=None, **kwargs):
-        self.update_data_set()
+        self.update_model(self.data_set_X,self.data_set_Y)
+        print("n_eval",self.evaluator.n_eval)
     
     def _finalize(self):
         return super()._finalize()
@@ -79,49 +88,67 @@ class BayesianOptimiztion(Algorithm):
         return self.model.predict(X, return_std=True)
 
     # sample from the search space
-    def sample(self):
+    def sample(self, sample_size = 10):
         if self.problem.has_bounds():
             xl, xu = self.problem.bounds()
-            X = uniform(xl, xu, size=(self.sample_size, self.problem.n_var))
+            X = uniform(xl, xu, size=(sample_size, self.problem.n_var))
+            
             return X
         
     
-    # define the acquisition function   
+    # define the acquisition function
+    def acquisition_function(self, X_sample):
+        # calculate the current best surrogate score 
+        predicted_y, _ = self.surrogate_function(self.data_set_X)
+        current_best = min(predicted_y)
+        
+        # calculate mean and std of the sample in the surrogate function
+        mu_sample, std_sample = self.surrogate_function(X_sample.reshape(-1, self.problem.n_var) )
+        mu_sample = mu_sample[:,0]
+
+        # calculate the probability of improvement
+        probability_of_improvement = self.find_probability_of_improvement(mu_sample, std_sample, current_best)
+
+        # calculate the expected improvement
+        return ((current_best - mu_sample) * probability_of_improvement + std_sample * norm.pdf((current_best - mu_sample) / (std_sample + 1**-16)))
+
+    # find the next point to sample
     def optimize_acquisition_function(self):
-        if self.problem.has_bounds():
-            # Randomly draw 100 sample points from the search space
-            X_sample = self.sample()
-            # calculate the current best surrogate score 
-            mu, _ = self.surrogate_function(self.pop.get("X"))
-            #print("mu",mu)
-            # calculate mean and std of the sample in the surrogate function
-            mu_sample, std_sample = self.surrogate_function(X_sample)
-            #print("mu_sample",mu_sample)
-            current_best = max(mu)
-            print("mu",mu)
-            # calculate the probability of improvement
-            probability_of_improvement = mu_sample - current_best / (std_sample + 1**-16)
-            # calculate the expected improvement
-            #expected_improvement = (mu - current_best) * probability_of_improvement + std_sample * norm.pdf(probability_of_improvement)
-            # find the index of the greatest scores
-            #print("pi",pi)
-            sum_probability_of_improvement = sum(probability_of_improvement, axis = 1)
-            index = argmax(sum_probability_of_improvement)
-            #print("probability_of_improvement",probability_of_improvement)
-            return X_sample[index, :]
+        fun_negative_acquisition = lambda X_sample: -1.0 * self.acquisition_function(X_sample)
+        xl, xu = self.problem.bounds()
+        initials = self.sample()
+        list_next_point = []
+
+        bounds_list = []
+        for l, u in zip (xl, xu):
+            bounds_list.append((l,u))
+
+        # attempt to find the minimum of the acquisition function
+        for arr_initial in initials:
+            next_point = scipy_minimize(fun_negative_acquisition,
+                                  x0=arr_initial,
+                                  bounds = bounds_list,
+                                  method="L-BFGS-B",
+                                  options={'disp': False}
+                                )
+            next_point_x = next_point.x
+            list_next_point.append(next_point_x)
+                
+        next_points = array(list_next_point)
+        acquisition_value = fun_negative_acquisition(next_points)
+        index_best = argmin(acquisition_value)
+        return next_points[index_best, :]
     
-    def get_next_points(self):
-        return self.optimize_acquisition_function()
+    def find_probability_of_improvement(self, mean, std, current_best):
+        return norm.cdf((current_best - mean) / (std + 1**-16))
+    
     # update the model with new samples
     def update_model(self, X, Y):
         self.model.fit(X, Y)
 
     # optimize the acquisition function
-    def update_data_set(self):
-        y = self.problem.evaluate(self.X_new)
-        # update the 
-        updated_X = vstack((self.pop.get("X"), self.X_new))
-        #print("updated_X",updated_X)
-        updated_Y = vstack((self.pop.get("F"), y))
-        self.update_model(updated_X, updated_Y)
+    def update_data_set(self, X_new):
+        # update the model with new samples
+        self.data_set_X = vstack((self.data_set_X, X_new))
+        self.data_set_Y = vstack((self.data_set_Y, self.problem.evaluate(X_new)))
     
