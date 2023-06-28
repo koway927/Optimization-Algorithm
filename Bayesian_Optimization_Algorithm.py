@@ -11,6 +11,7 @@ from pymoo.core.population import Population
 from scipy.stats import norm
 from scipy.optimize import minimize as scipy_minimize
 from numpy import array
+from numpy import lexsort
 
 #The optimization process itself is as follows:
 
@@ -32,7 +33,7 @@ from numpy import array
 # the Gaussian process model m(X, y) in the next iteration — as the number 
 # of data points increases, m(X, y) becomes better at predicting the optimum of f(x).
 
-class BayesianOptimiztion(Algorithm):
+class Bayesian_Optimization(Algorithm):
     def __init__(self,
                  sample_size = 10, # The number of samples to be generated from the problems and 
                                     #used in the acquisition function
@@ -61,7 +62,10 @@ class BayesianOptimiztion(Algorithm):
 
     def _initialize_advance(self, infills=None, **kwargs):
         self.data_set_X = self.pop.get("X")
-        self.data_set_Y = self.problem.evaluate(self.data_set_X)
+        if self.problem.has_constraints():
+            self.data_set_Y = self.problem.evaluate(self.data_set_X)[0]
+        else:
+            self.data_set_Y = self.problem.evaluate(self.data_set_X)
         self.update_model(self.data_set_X,self.data_set_Y)
 
         super()._initialize_advance(infills=infills, **kwargs)
@@ -73,11 +77,11 @@ class BayesianOptimiztion(Algorithm):
 
         off = Population.new(X=self.data_set_X)
         self.pop = off
+        self.repair(self.problem, off)
         return off
         
     
     def _advance(self, infills=None, **kwargs):
-        self.update_model(self.data_set_X,self.data_set_Y)
         print("n_eval",self.evaluator.n_eval)
     
     def _finalize(self):
@@ -132,12 +136,20 @@ class BayesianOptimiztion(Algorithm):
                                   options={'disp': False}
                                 )
             next_point_x = next_point.x
+                
+
             list_next_point.append(next_point_x)
                 
         next_points = array(list_next_point)
         acquisition_value = fun_negative_acquisition(next_points)
+        if self.problem.has_constraints():
+            cv = [sum(c) for c in self.problem.evaluate(next_points)[1]]
+            S = lexsort([acquisition_value, cv])
+            return next_points[S[0], :]
+        
         index_best = argmin(acquisition_value)
         return next_points[index_best, :]
+        
     
     def find_probability_of_improvement(self, mean, std, current_best):
         return norm.cdf((current_best - mean) / (std + 1**-16))
@@ -150,5 +162,7 @@ class BayesianOptimiztion(Algorithm):
     def update_data_set(self, X_new):
         # update the model with new samples
         self.data_set_X = vstack((self.data_set_X, X_new))
-        self.data_set_Y = vstack((self.data_set_Y, self.problem.evaluate(X_new)))
-    
+        if self.problem.has_constraints():
+            self.data_set_Y = vstack((self.data_set_Y, self.problem.evaluate(X_new)[0]))
+        else:
+            self.data_set_Y = vstack((self.data_set_Y, self.problem.evaluate(X_new)))
